@@ -18,7 +18,11 @@ function mapFuelType(googleType: string): FuelType | null {
 }
 
 export async function POST(req: NextRequest) {
-  const { lat, lng, radiusMeters = 8046 } = await req.json();
+  const { lat, lng, radiusMeters = 8046, fuelType = "regular" } = await req.json();
+
+  if (!["regular", "mid", "premium"].includes(fuelType)) {
+    return NextResponse.json({ error: "Invalid fuel type" }, { status: 400 });
+  }
 
   if (typeof lat !== "number" || typeof lng !== "number") {
     return NextResponse.json({ error: "lat and lng required" }, { status: 400 });
@@ -139,29 +143,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const stationIds = (stations ?? []).map((s) => s.id);
-
-  const { data: prices } = await supabase
-    .from("price_submissions")
-    .select("station_id, price, source, submitted_at")
-    .in("station_id", stationIds)
-    .eq("fuel_type", "regular")
-    .order("submitted_at", { ascending: false });
-
-  const stationsWithPrices = (stations ?? []).map((station) => {
-    const userPrice = prices?.find(
-      (p) => p.station_id === station.id && p.source === "user"
-    );
-    const googlePrice = prices?.find(
-      (p) => p.station_id === station.id && p.source === "google"
-    );
-    const best = userPrice ?? googlePrice;
-
-    return {
-      ...station,
-      price: best ? best.price : null,
-    };
-  });
-
-  return NextResponse.json({ stations: stationsWithPrices });
+  return NextResponse.json({ stations: stations ?? [] });
 }

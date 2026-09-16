@@ -1,7 +1,7 @@
 "use client";
 
 import { APIProvider, Map, AdvancedMarker, InfoWindow } from "@vis.gl/react-google-maps";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 type Station = {
   id: number;
@@ -18,6 +18,22 @@ export default function StationMap() {
   const [selectedStation, setSelectedStation] = useState<Station | null>(null);
   const [hoveredStationId, setHoveredStationId] = useState<number | null>(null);
   const [loadingStations, setLoadingStations] = useState(false);
+  const [submitPrice, setSubmitPrice] = useState("");
+  const [submitFuelType, setSubmitFuelType] = useState<"regular" | "mid" | "premium">("regular");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
+  const [selectedFuelType, setSelectedFuelType] = useState<"regular" | "mid" | "premium">("regular");
+  const lastFetchLocationRef = useRef<{ lat: number; lng: number } | null>(null);
+
+function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371000;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -41,8 +57,18 @@ export default function StationMap() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  useEffect(() => {
+  // Discover/seed stations — only runs when location changes, not fuel type
+    useEffect(() => {
     if (!userLocation) return;
+
+    if (
+      lastFetchLocationRef.current &&
+      distanceMeters(userLocation, lastFetchLocationRef.current) < 1000
+    ) {
+      return;
+    }
+
+    lastFetchLocationRef.current = userLocation; // set immediately, before the async call even starts
 
     async function fetchNearbyStations() {
       setLoadingStations(true);
@@ -53,7 +79,7 @@ export default function StationMap() {
           body: JSON.stringify({ lat: userLocation!.lat, lng: userLocation!.lng }),
         });
         const json = await res.json();
-        setStations(json.stations ?? []);
+        setStations((json.stations ?? []).map((s: any) => ({ ...s, price: null })));
       } catch (err) {
         console.error("Failed to fetch nearby stations:", err);
       } finally {
@@ -63,6 +89,73 @@ export default function StationMap() {
 
     fetchNearbyStations();
   }, [userLocation]);
+
+  // Fetch prices — runs whenever fuel type changes, or the station list changes.
+  // Pure Supabase lookup, no Google calls, near-instant.
+  useEffect(() => {
+    if (stations.length === 0) return;
+
+    async function fetchPrices() {
+      try {
+        const res = await fetch("/api/stations/prices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stationIds: stations.map((s) => s.id),
+            fuelType: selectedFuelType,
+          }),
+        });
+        const json = await res.json();
+        const priceMap: Record<number, number | null> = json.prices ?? {};
+        setStations((prev) =>
+          prev.map((s) => ({ ...s, price: priceMap[s.id] ?? null }))
+        );
+      } catch (err) {
+        console.error("Failed to fetch prices:", err);
+      }
+    }
+
+    fetchPrices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFuelType, stations.length]);
+
+  async function handleSubmitPrice() {
+    if (!selectedStation) return;
+    const priceNum = parseFloat(submitPrice);
+
+    if (isNaN(priceNum) || priceNum <= 0) {
+      setSubmitMessage("Enter a valid price.");
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmitMessage(null);
+
+    try {
+      const res = await fetch("/api/prices/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stationId: selectedStation.id,
+          price: priceNum,
+          fuelType: submitFuelType,
+        }),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok) {
+        setSubmitMessage(json.error ?? "Something went wrong.");
+      } else {
+        setSubmitMessage("Price submitted! Thanks for helping out.");
+        setSubmitPrice("");
+      }
+    } catch (err) {
+      setSubmitMessage("Network error, try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   function startTrip(station: Station) {
     if (!userLocation) return;
@@ -90,8 +183,30 @@ export default function StationMap() {
     );
   }
 
-  return (
+    return (
     <APIProvider apiKey={process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY!}>
+      <div style={{ display: "flex", gap: 8, padding: "8px 0" }}>
+        {(["regular", "mid", "premium"] as const).map((type) => (
+          <button
+            key={type}
+            onClick={() => setSelectedFuelType(type)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 20,
+              border: "none",
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: "pointer",
+              background: selectedFuelType === type ? "#083344" : "#e5e7eb",
+              color: selectedFuelType === type ? "#fff" : "#374151",
+              textTransform: "capitalize",
+              transition: "all 0.15s ease",
+            }}
+          >
+            {type === "mid" ? "Mid-grade" : type}
+          </button>
+        ))}
+      </div>
       <div style={{ height: "600px", width: "100%" }}>
         <Map
           defaultCenter={userLocation}
@@ -163,18 +278,23 @@ export default function StationMap() {
               </AdvancedMarker>
             );
           })}
-          {selectedStation && (
+            {selectedStation && (
             <InfoWindow
               position={{ lat: selectedStation.lat, lng: selectedStation.lng }}
-              onCloseClick={() => setSelectedStation(null)}
+              onCloseClick={() => {
+                setSelectedStation(null);
+                setSubmitMessage(null);
+              }}
             >
-              <div style={{ minWidth: 160 }}>
-                <p style={{ margin: 0, fontWeight: 600 }}>{selectedStation.name}</p>
-                <p style={{ margin: "4px 0", fontSize: 12, color: "#555" }}>
+              <div style={{ minWidth: 200 }}>
+                <p style={{ margin: 0, fontWeight: 800, fontSize: 20, color: "#0f172a" }}>
+                  {selectedStation.name}
+                </p>
+                <p style={{ margin: "4px 0", fontSize: 12, color: "#64748b" }}>
                   {selectedStation.address}
                 </p>
                 {selectedStation.price != null && (
-                  <p style={{ margin: "4px 0", fontWeight: 600 }}>
+                  <p style={{ margin: "4px 0", fontWeight: 700, fontSize: 16, color: "#0891b2" }}>
                     ${selectedStation.price.toFixed(2)} / gal
                   </p>
                 )}
@@ -192,6 +312,67 @@ export default function StationMap() {
                 >
                   Start Trip
                 </button>
+
+                <hr style={{ margin: "10px 0", border: "none", borderTop: "1px solid #eee" }} />
+
+                <p style={{ margin: "0 0 6px 0", fontSize: 13, fontWeight: 600, color: "#111" }}>
+                  Submit a price
+                </p>
+
+                <select
+                  value={submitFuelType}
+                  onChange={(e) => setSubmitFuelType(e.target.value as any)}
+                  style={{
+                    width: "100%",
+                    marginBottom: 6,
+                    padding: 6,
+                    color: "#111",
+                    background: "#fff",
+                    border: "1px solid #ccc",
+                    borderRadius: 4,
+                  }}
+                >
+                  <option value="regular">Regular</option>
+                  <option value="mid">Mid-grade</option>
+                  <option value="premium">Premium</option>
+                </select>
+
+                <input
+                  type="number"
+                  step="0.01"
+                  placeholder="e.g. 3.29"
+                  value={submitPrice}
+                  onChange={(e) => setSubmitPrice(e.target.value)}
+                  style={{
+                    width: "100%",
+                    marginBottom: 6,
+                    padding: 6,
+                    color: "#111",
+                    background: "#fff",
+                    border: "1px solid #ccc",
+                    borderRadius: 4,
+                  }}
+                />
+
+                <button
+                  onClick={handleSubmitPrice}
+                  disabled={submitting}
+                  style={{
+                    width: "100%",
+                    padding: "6px 12px",
+                    background: "#22d3ee",
+                    border: "none",
+                    borderRadius: 6,
+                    fontWeight: 600,
+                    cursor: submitting ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {submitting ? "Submitting..." : "Submit"}
+                </button>
+
+                {submitMessage && (
+                  <p style={{ marginTop: 6, fontSize: 12, color: "#555" }}>{submitMessage}</p>
+                )}
               </div>
             </InfoWindow>
           )}
